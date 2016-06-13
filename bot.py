@@ -20,8 +20,9 @@ SELECT_CITY, MAIN_MENU, START, MEETING = range(4)
 def db_transaction(db, q):
     cursor = db.cursor()
     cursor.execute(q)
-    print(">>>  ", q)
-    print("<<<  ", cursor.fetchall())
+    db.commit()
+    # print(">>>  ", q)
+    # print("<<<  ", cursor.fetchall())
     return cursor.fetchall()
 
 
@@ -106,7 +107,7 @@ def main():
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("help", helper))
 
-    # on noncommand i.e message - echo the message on Telegram
+    # on noncommand i.e message
     dp.add_handler(MessageHandler([Filters.text], chat))
 
     # log all errors
