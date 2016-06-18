@@ -191,7 +191,7 @@ def chat(bot, update):
             levenstein = []
             for i in range(len(sql_station)):
                 levenstein.append(distance((str(sql_station[i])[2:-3]), answer))
-            sql_real_station = db_transaction(db, 'SELECT real_station FROM codes WHERE station ="'+str(sql_station[levenstein.index(min(levenstein))])[2:-3]+'" AND city = "' + str(user_city)[3:-4].lower() + '" ')
+            sql_real_station = db_transaction(db, 'SELECT real_station FROM codes WHERE station ="'+str(sql_station[levenstein.index(min(levenstein))])[2:-3]+'" AND city = "' + user_city.lower() + '" ')
             sql_esr = db_transaction(db, 'SELECT esr FROM codes WHERE station ="' + str(sql_station[levenstein.index(min(levenstein))])[2:-3] + '" AND city = "' + user_city.lower() + '" ')
             db_transaction(db, 'UPDATE routes SET from_ = "' + str(sql_esr)[3:-4] + '" WHERE uid= "' + str(user_id) + '" AND name = ("' + route_name + '")')
             db_transaction(db, 'UPDATE routes SET from_name = "' + str(sql_real_station)[3:-4] + '" WHERE uid= "' + str(user_id) + '" AND name = ("' + route_name + '")')
@@ -204,8 +204,8 @@ def chat(bot, update):
         levenstein = []
         for i in range(len(sql_station)):
             levenstein.append(distance((str(sql_station[i])[2:-3]), answer))
-        sql_real_station = db_transaction(db, 'SELECT real_station FROM codes WHERE station ="'+str(sql_station[levenstein.index(min(levenstein))])[2:-3]+'" AND city = "' + str(user_city)[3:-4].lower() + '" ')
-        sql_esr = db_transaction(db, 'SELECT esr FROM codes WHERE station ="'+str(sql_station[levenstein.index(min(levenstein))])[2:-3]+'" AND city = "' + str(user_city)[3:-4].lower() + '" ')
+        sql_real_station = db_transaction(db, 'SELECT real_station FROM codes WHERE station ="'+str(sql_station[levenstein.index(min(levenstein))])[2:-3]+'" AND city = "' + user_city.lower() + '" ')
+        sql_esr = db_transaction(db, 'SELECT esr FROM codes WHERE station ="'+str(sql_station[levenstein.index(min(levenstein))])[2:-3]+'" AND city = "' + user_city.lower() + '" ')
         db_transaction(db, 'UPDATE routes SET to_ = "' + str(sql_esr)[3:-4] + '" WHERE uid= "' + str(user_id) + '" AND name = ("' + route_name + '")')
         db_transaction(db, 'UPDATE routes SET to_name = "'+str(sql_real_station)[3:-4]+'" WHERE uid= "' + str(user_id) + '" AND name = ("' + route_name + '")')
         text = user_name + ', поздравляю, маршрут "' + route_name + '" успешно создан! Приятного использования TrainRunner'
