@@ -1,19 +1,26 @@
 from config import *
-import telegram
+from collections import namedtuple
+from urllib import request
+from urllib.parse import urlencode
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+import telegram
 import logging
 import sqlite3
+import json
+import datetime
 
+# TODO: write logs to file
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger('TrainRunnerBot.'+__name__)
+logger = logging.getLogger('TrainRunnerBot.' + __name__)
 
 # States are saved in a dict that maps chat_id -> state
 state = dict()
 
+db_name = 'DB.sqlite'
 cities = ("Москва и МО", "Санкт-Петербург и ЛО", "Новосибирская область",)
 default_route_names = ("На работу", "Домой", "К маме",)
-db_name = 'DB.sqlite'
+train = namedtuple('train', ['uid', 'arrival', 'departure', 'duration', 'stops', 'express'])
 
 # Define all possible states of a chat
 SELECT_CITY, MAIN_MENU, START, MEETING, CREATE_ROUTE, ROUTE_NAME, FROM_STATION, TO_STATION, ROUTE_READY, STILL_NO_ROUTES, CHOOSE_ROUTE, CHOOSE_TIMETABLE = range(12)
@@ -37,16 +44,34 @@ def distance(a, b):
         a, b = b, a
         n, m = m, n
 
-    current_row = range(n+1)  # Keep current and previous row, not entire matrix
-    for i in range(1, m+1):
-        previous_row, current_row = current_row, [i]+[0]*n
-        for j in range(1, n+1):
-            add, delete, change = previous_row[j]+1, current_row[j-1]+1, previous_row[j-1]
-            if a[j-1] != b[i-1]:
+    current_row = range(n + 1)  # Keep current and previous row, not entire matrix
+    for i in range(1, m + 1):
+        previous_row, current_row = current_row, [i] + [0] * n
+        for j in range(1, n + 1):
+            add, delete, change = previous_row[j] + 1, current_row[j - 1] + 1, previous_row[j - 1]
+            if a[j - 1] != b[i - 1]:
                 change += 1
             current_row[j] = min(add, delete, change)
 
     return current_row[n]
+
+
+def get_trains(from_esr, to_esr, date):
+    params = {'apikey': ya_apikey, 'format': 'json', 'lang': 'ru', 'system': 'esr', 'transport_types': 'suburban'}
+    params['from'] = from_esr
+    params['to'] = to_esr
+    params['date'] = date.date().strftime('%Y-%m-%d')
+    url = ya_apiurl + urlencode(params)
+    r = json.loads(request.urlopen(url).read().decode("utf-8"))
+    d_format = '%Y-%m-%d %H:%M:%S'
+    trains = [train(uid=t['thread']['uid'],
+                    arrival=datetime.datetime.strptime(t['arrival'], d_format),
+                    departure=datetime.datetime.strptime(t['departure'], d_format),
+                    duration=t['duration'],
+                    stops=t['stops'],
+                    express=bool(t['thread']['express_type']))
+              for t in r['threads']]
+    return trains
 
 
 def start(bot, update):
@@ -113,7 +138,7 @@ def chat(bot, update):
     if chat_state == STILL_NO_ROUTES:
         if answer == 'Новый маршрут':
             text = user_name + ', давайте вместе создадим новый маршрут. Предлагаю Вам выбрать для него название из списка - или можете ввести свое'
-            state[user_id]= ROUTE_NAME
+            state[user_id] = ROUTE_NAME
             route_name_kbd = telegram.ReplyKeyboardMarkup([[route_name] for route_name in default_route_names])
             bot.sendMessage(update.message.from_user.id, text=text, reply_markup=route_name_kbd)
         else:
@@ -147,7 +172,7 @@ def chat(bot, update):
             state[user_id] = MAIN_MENU
             text = "Хорошо, " + user_name + ". Я понял, город менять не будем. Предлагаю продолжить пользоваться раписанием"
             bot.sendMessage(update.message.chat_id, text=text, reply_markup=main_kbd)
-            
+
     elif chat_state == SELECT_CITY:
         if answer in cities:
             sql_result = db_transaction(db, 'SELECT city FROM cities WHERE uid=' + str(user_id))
@@ -182,7 +207,7 @@ def chat(bot, update):
         bot.sendMessage(update.message.chat_id, text=text, reply_markup=wrong_route_kbd)
     elif chat_state == FROM_STATION:
         if answer == "Я неправильно ввел название маршрута!":
-            db_transaction(db, 'DELETE FROM routes WHERE uid=' + str(user_id) + ' AND name IN ("' + route_name + '")') 
+            db_transaction(db, 'DELETE FROM routes WHERE uid=' + str(user_id) + ' AND name IN ("' + route_name + '")')
             text = user_name + ', попробуйте ввести название маршрута еще раз'
             state[user_id] = ROUTE_NAME
             bot.sendMessage(update.message.from_user.id, text=text, reply_markup=route_name_kbd)
