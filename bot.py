@@ -23,7 +23,7 @@ default_route_names = ("На работу", "Домой", "К маме",)
 train = namedtuple('train', ['uid', 'arrival', 'departure', 'duration', 'stops', 'express'])
 
 # Define all possible states of a chat
-SELECT_CITY, MAIN_MENU, START, MEETING, CREATE_ROUTE, ROUTE_NAME, FROM_STATION, TO_STATION, ROUTE_READY, STILL_NO_ROUTES, CHOOSE_ROUTE, CHOOSE_TIMETABLE = range(12)
+SELECT_CITY, MAIN_MENU, START, MEETING, CREATE_ROUTE, ROUTE_NAME, FROM_STATION, TO_STATION, ROUTE_READY, STILL_NO_ROUTES, CHOOSE_ROUTE, CHOOSE_TIMETABLE, NEXT_TRAIN = range(13)
 
 
 def db_transaction(db, q):
@@ -74,6 +74,12 @@ def get_trains(from_esr, to_esr, date):
     return trains
 
 
+def next_train(from_esr, to_esr):
+    now = datetime.datetime.now()
+    sorted_trains = sorted(get_trains(from_esr, to_esr, now), key=lambda t: t.departure-now)
+    rest_trains = [t for t in sorted_trains if (now-t.departure) < datetime.timedelta(0, 0, 0)]
+    return rest_trains[0]
+
 def start(bot, update):
     user_id = update.message.from_user.id
     db = sqlite3.connect(db_name)
@@ -121,40 +127,66 @@ def chat(bot, update):
     main_kbd = telegram.ReplyKeyboardMarkup([['Раписание', 'Ближайшая электричка'], ['Маршруты', 'INFO']])
     yes_no_kbd = telegram.ReplyKeyboardMarkup([['Да'], ['Нет, создам позже']])
     route_name_kbd = telegram.ReplyKeyboardMarkup([[route_name] for route_name in default_route_names])
+    no_routes_kbd = telegram.ReplyKeyboardMarkup([['Новый маршрут'], ['Главное меню']])
 
     if answer == 'Маршруты':
-        user_routes = db_transaction(db, 'SELECT * FROM routes WHERE uid=' + str(user_id))
+        user_routes = db_transaction(db, 'SELECT name FROM routes WHERE uid=' + str(user_id))
         if not user_routes:
-            text = str(user_name) + ', Вы пока не создавали маршрутов :( Чтобы создать маршрут, нажмите кнопку "Новый маршрут"'
+            text = user_name + ', Вы пока не создавали маршрутов :( Чтобы создать маршрут, нажмите кнопку "Новый маршрут"'
             state[user_id] = STILL_NO_ROUTES
-            no_routes_kbd = telegram.ReplyKeyboardMarkup([['Новый маршрут'], ['Главное меню']])
-            bot.sendMessage(update.message.from_user.id, text=text, reply_markup=no_routes_kbd)
+            bot.sendMessage(user_id, text=text, reply_markup=no_routes_kbd)
         else:
-            user_routes_kbd = telegram.ReplyKeyboardMarkup([[route_name] for route_name in [user_routes[i][3] for i in range(len(user_routes))]])
+            # TODO: create new route from inline keyboard?
+            user_routes_kbd = telegram.ReplyKeyboardMarkup(user_routes + [("Создать новый маршрут",)])
             text = user_name + ", выберите созданный маршрут или создайте новый"
             state[user_id] = CHOOSE_ROUTE
-            bot.sendMessage(update.message.from_user.id, text=text, reply_markup=user_routes_kbd)
+            bot.sendMessage(user_id, text=text, reply_markup=user_routes_kbd)
+
+    if answer == 'Ближайшая электричка':
+        user_routes = db_transaction(db, 'SELECT name FROM routes WHERE uid=' + str(user_id))
+        if not user_routes:
+            text = user_name + ', Вы пока не создавали маршрутов :( Чтобы создать маршрут, нажмите кнопку "Новый маршрут"'
+            state[user_id] = STILL_NO_ROUTES
+            bot.sendMessage(user_id, text=text, reply_markup=no_routes_kbd)
+        else:
+            user_routes_kbd = telegram.ReplyKeyboardMarkup(user_routes)
+            text = user_name + ", выберите маршрут"
+            state[user_id] = NEXT_TRAIN
+            bot.sendMessage(user_id, text=text, reply_markup=user_routes_kbd)
+
+    if chat_state == NEXT_TRAIN:
+        from_st, to_st = db_transaction(db, "SELECT `from_`, `to_` FROM `routes` WHERE (`uid`='" + str(user_id) + "' AND `name`='" + answer + "')")[0]
+        nt = next_train(from_st, to_st)
+        dt = nt.departure-datetime.datetime.now()
+        text = "Ближайшая электричка по маршруту '" + answer + "' отправляется через " + str(dt.seconds//3600) + " ч " + str((dt.seconds//60)%60) + " м:\nотправление в " + nt.departure.strftime('%H:%M') + "\nприбытие в " + nt.arrival.strftime('%H:%M')
+        state[user_id] = MAIN_MENU
+        bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
 
     if chat_state == STILL_NO_ROUTES:
         if answer == 'Новый маршрут':
             text = user_name + ', давайте вместе создадим новый маршрут. Предлагаю Вам выбрать для него название из списка - или можете ввести свое'
             state[user_id] = ROUTE_NAME
             route_name_kbd = telegram.ReplyKeyboardMarkup([[route_name] for route_name in default_route_names])
-            bot.sendMessage(update.message.from_user.id, text=text, reply_markup=route_name_kbd)
+            bot.sendMessage(user_id, text=text, reply_markup=route_name_kbd)
         else:
             state[user_id] = MAIN_MENU
             text = user_name + ", предлагаю продолжить пользоваться раписанием"
-            bot.sendMessage(update.message.chat_id, text=text, reply_markup=main_kbd)
+            bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
 
     if chat_state == CHOOSE_ROUTE:
-        user_routes = db_transaction(db, 'SELECT * FROM routes WHERE uid=' + str(user_id))
-        keys = [user_routes[i][3] for i in range(len(user_routes))]
-        values = [[user_routes[i][1],user_routes[i][2],user_routes[i][4],user_routes[i][5]] for i in range(len(user_routes))]
-        routes = dict(zip(keys, values))
-        text = 'Станция отправления: '+ routes[answer][2]+ '; Станция прибытия: '+routes[answer][3]+ '. Вы можете посмотреть ближайщую электричку или расписание'
-        your_routes_kbd = telegram.ReplyKeyboardMarkup([['Ближайшая электричка'], ['Расписание']])
-        bot.sendMessage(update.message.from_user.id, text=text, reply_markup=your_routes_kbd)
-        state[user_id] = CHOOSE_TIMETABLE
+        if answer == "Создать новый маршрут":
+            text = user_name + ', предлагаю Вам выбрать название из списка - или можете ввести свое'
+            state[user_id] = ROUTE_NAME
+            bot.sendMessage(user_id, text=text, reply_markup=route_name_kbd)
+        else:
+            user_routes = db_transaction(db, 'SELECT * FROM routes WHERE uid=' + str(user_id))
+            keys = [user_routes[i][3] for i in range(len(user_routes))]
+            values = [[user_routes[i][1],user_routes[i][2],user_routes[i][4],user_routes[i][5]] for i in range(len(user_routes))]
+            routes = dict(zip(keys, values))
+            text = 'Станция отправления: '+ routes[answer][2]+ '; Станция прибытия: '+routes[answer][3]+ '. Вы можете посмотреть ближайщую электричку или расписание'
+            your_routes_kbd = telegram.ReplyKeyboardMarkup([['Ближайшая электричка'], ['Расписание']])
+            bot.sendMessage(user_id, text=text, reply_markup=your_routes_kbd)
+            state[user_id] = CHOOSE_TIMETABLE
 
     if chat_state == MEETING:
         db_transaction(db, 'INSERT INTO cities (uid, user_name) VALUES ("' + str(user_id) + '", "' + answer + '")')
@@ -184,20 +216,21 @@ def chat(bot, update):
                 db_transaction(db, 'INSERT INTO cities (city) VALUES ("' + answer + '")')
             text = "Отлично, " + user_name + ", теперь Вы можете приступить к использованию бота! Желаете добавить маршрут, которым часто пользуетесь?"
             state[user_id] = CREATE_ROUTE
-            bot.sendMessage(update.message.from_user.id, text=text, reply_markup=yes_no_kbd)
+            bot.sendMessage(user_id, text=text, reply_markup=yes_no_kbd)
         else:
             state[user_id] = MAIN_MENU
             text = str('Блин, ' + user_name + ', ну что Вам сказать - хреново, нет у нас вашего города. Попробуйте еще в другой раз')
-            bot.sendMessage(update.message.from_user.id, text=text, reply_markup=main_kbd)
+            bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
     elif chat_state == CREATE_ROUTE:
+        # TODO: route name must be unique
         if answer == 'Да':
             text = user_name + ', предлагаю Вам выбрать название из списка - или можете ввести свое'
             state[user_id] = ROUTE_NAME
-            bot.sendMessage(update.message.from_user.id, text=text, reply_markup=route_name_kbd)
+            bot.sendMessage(user_id, text=text, reply_markup=route_name_kbd)
         else:
             state[user_id] = MAIN_MENU
             text = str('Хорошо, ' + user_name + ', Вы всегда можете создать маршрут перейдя во вкладку "Маршруты". Желаю приятного использования TrainRunner. За дополнительной информацией нажмите /help')
-            bot.sendMessage(update.message.from_user.id, text=text, reply_markup=main_kbd)
+            bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
     elif chat_state == ROUTE_NAME:
         route_name = answer
         db_transaction(db, 'INSERT INTO routes (uid, name) VALUES ("' + str(user_id) + '", "' + answer + '")')
@@ -210,7 +243,7 @@ def chat(bot, update):
             db_transaction(db, 'DELETE FROM routes WHERE uid=' + str(user_id) + ' AND name IN ("' + route_name + '")')
             text = user_name + ', попробуйте ввести название маршрута еще раз'
             state[user_id] = ROUTE_NAME
-            bot.sendMessage(update.message.from_user.id, text=text, reply_markup=route_name_kbd)
+            bot.sendMessage(user_id, text=text, reply_markup=route_name_kbd)
         else:
             sql_station = db_transaction(db, 'SELECT station FROM codes ')
             levenstein = []
@@ -223,7 +256,7 @@ def chat(bot, update):
             text = user_name + ', ну и станцию прибытия, пожалуйста'
             state[user_id] = TO_STATION
             from_kbd = telegram.ReplyKeyboardHide()
-            bot.sendMessage(update.message.from_user.id, text=text, reply_markup=from_kbd)
+            bot.sendMessage(user_id, text=text, reply_markup=from_kbd)
     elif chat_state == TO_STATION:
         sql_station = db_transaction(db, 'SELECT station FROM codes ')
         levenstein = []
@@ -235,7 +268,7 @@ def chat(bot, update):
         db_transaction(db, 'UPDATE routes SET to_name = "'+str(sql_real_station)[3:-4]+'" WHERE uid= "' + str(user_id) + '" AND name = ("' + route_name + '")')
         text = user_name + ', поздравляю, маршрут "' + route_name + '" успешно создан! Приятного использования TrainRunner'
         state[user_id] = ROUTE_READY
-        bot.sendMessage(update.message.from_user.id, text=text, reply_markup=main_kbd)
+        bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
 
 
 def main():
