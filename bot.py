@@ -27,7 +27,7 @@ train = namedtuple('train', ['uid', 'arrival', 'departure', 'duration', 'stops',
 
 
 # Define all possible states of a chat
-SELECT_CITY, MAIN_MENU, START, MEETING, CREATE_ROUTE, ROUTE_NAME, FROM_STATION, TO_STATION, ROUTE_READY, STILL_NO_ROUTES, CHOOSE_ROUTE, CHOOSE_TIMETABLE, NEXT_TRAIN = range(13)
+SELECT_CITY, MAIN_MENU, START, MEETING, CREATE_ROUTE, ROUTE_NAME, FROM_STATION, TO_STATION, ROUTE_READY, STILL_NO_ROUTES, CHOOSE_ROUTE, CHOOSE_TIMETABLE, NEXT_TRAIN, ROUTE_CHECK, NAME_CHANGE, FROM_CHANGE, TO_CHANGE, NAME_CHECK = range(18)
 
 
 def db_transaction(db, q):
@@ -41,6 +41,11 @@ def db_transaction(db, q):
 
 sql_station = db_transaction(sqlite3.connect(db_name), 'SELECT station FROM codes ')
 
+def canonize(source):
+    stop_symbols = '.,!?:;-\n\r()'
+    stop_words = (u'республика', u'область', u'край', u'округ',u'ская')
+
+    return ( [x for x in [y.strip(stop_symbols) for y in source.lower().split()] if x and (x not in stop_words)] )
 
 def distance(a, b):
     """Рассчет расстояния Левенштейна между a и b"""
@@ -90,6 +95,15 @@ def next_train(from_esr, to_esr):
     else:
         return []
 
+
+def print_next_train(user_id, route_name):
+        from_st, to_st = db_transaction(sqlite3.connect(db_name), "SELECT `from_`, `to_` FROM `routes` WHERE (`uid`='" + str(user_id) + "' AND `name`='" + route_name + "')")[0]
+        nt = next_train(from_st, to_st)
+        dt = nt.departure-datetime.datetime.now()
+        text = "Ближайшая электричка по маршруту '" + route_name + "' отправляется через " + str(dt.seconds//3600) + " ч " + str((dt.seconds//60)%60) + " м:\nотправление в " + nt.departure.strftime('%H:%M') + "\nприбытие в " + nt.arrival.strftime('%H:%M')
+        return text
+
+
 def start(bot, update):
     user_id = update.message.from_user.id
     db = sqlite3.connect(db_name)
@@ -118,12 +132,12 @@ def error(bot, update, error):
 
 
 def chat(bot, update):
-    # nonlocal db
-    # nonlocal sql_station
     user_id = update.message.from_user.id
     answer = update.message.text
     chat_state = state.get(user_id)
     db = sqlite3.connect(db_name)
+    sql_result = db_transaction(db, 'SELECT user_name, city FROM cities WHERE uid=' + str(user_id))
+    user_name, user_city = sql_result[0]
     if user_id not in dd:
         dd[user_id] = dict()
         route_name = ''
@@ -146,10 +160,16 @@ def chat(bot, update):
     # Keyboards
     city_kbd = telegram.ReplyKeyboardMarkup([[city] for city in cities])
     main_kbd = telegram.ReplyKeyboardMarkup([['Раписание', 'Ближайшая электричка'], ['Маршруты', 'INFO']])
-    yes_no_kbd = telegram.ReplyKeyboardMarkup([['Да'], ['Нет, создам позже']])
+    yes_no_kbd = telegram.ReplyKeyboardMarkup([['Да'], ['Нет']])
     route_name_kbd = telegram.ReplyKeyboardMarkup([[route_name] for route_name in default_route_names])
     no_routes_kbd = telegram.ReplyKeyboardMarkup([['Новый маршрут'], ['Главное меню']])
-
+    empty_kbd = telegram.ReplyKeyboardHide()
+    
+    if answer == 'Главное меню':
+        state[user_id] = MAIN_MENU
+        text = user_name + ", предлагаю продолжить пользоваться раписанием"
+        bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
+    
     if answer == 'Маршруты':
         user_routes = db_transaction(db, 'SELECT name FROM routes WHERE uid=' + str(user_id))
         if not user_routes:
@@ -164,22 +184,26 @@ def chat(bot, update):
             bot.sendMessage(user_id, text=text, reply_markup=user_routes_kbd)
 
     if answer == 'Ближайшая электричка':
-        user_routes = db_transaction(db, 'SELECT name FROM routes WHERE uid=' + str(user_id))
-        if not user_routes:
-            text = user_name + ', Вы пока не создавали маршрутов :( Чтобы создать маршрут, нажмите кнопку "Новый маршрут"'
-            state[user_id] = STILL_NO_ROUTES
-            bot.sendMessage(user_id, text=text, reply_markup=no_routes_kbd)
+        if dd[user_id].get('current_route'):
+            text = print_next_train(user_id, dd[user_id]['current_route'])
+            state[user_id] = MAIN_MENU
+            bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
+            del dd[user_id]['current_route']
+            return
         else:
-            user_routes_kbd = telegram.ReplyKeyboardMarkup(user_routes)
-            text = user_name + ", выберите маршрут"
-            state[user_id] = NEXT_TRAIN
-            bot.sendMessage(user_id, text=text, reply_markup=user_routes_kbd)
+            user_routes = db_transaction(db, 'SELECT name FROM routes WHERE uid=' + str(user_id))
+            if not user_routes:
+                text = user_name + ', Вы пока не создавали маршрутов :( Чтобы создать маршрут, нажмите кнопку "Новый маршрут"'
+                state[user_id] = STILL_NO_ROUTES
+                bot.sendMessage(user_id, text=text, reply_markup=no_routes_kbd)
+            else:
+                user_routes_kbd = telegram.ReplyKeyboardMarkup(user_routes)
+                text = user_name + ", выберите маршрут"
+                state[user_id] = NEXT_TRAIN
+                bot.sendMessage(user_id, text=text, reply_markup=user_routes_kbd)
 
     if chat_state == NEXT_TRAIN:
-        from_st, to_st = db_transaction(db, "SELECT `from_`, `to_` FROM `routes` WHERE (`uid`='" + str(user_id) + "' AND `name`='" + answer + "')")[0]
-        nt = next_train(from_st, to_st)
-        dt = nt.departure-datetime.datetime.now()
-        text = "Ближайшая электричка по маршруту '" + answer + "' отправляется через " + str(dt.seconds//3600) + " ч " + str((dt.seconds//60)%60) + " м:\nотправление в " + nt.departure.strftime('%H:%M') + "\nприбытие в " + nt.arrival.strftime('%H:%M')
+        text = print_next_train(user_id, answer)
         state[user_id] = MAIN_MENU
         bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
 
@@ -202,23 +226,23 @@ def chat(bot, update):
         else:
             user_routes = db_transaction(db, 'SELECT * FROM routes WHERE uid=' + str(user_id))
             keys = [user_routes[i][3] for i in range(len(user_routes))]
-            values = [[user_routes[i][1],user_routes[i][2],user_routes[i][4],user_routes[i][5]] for i in range(len(user_routes))]
+            values = [[user_routes[i][1], user_routes[i][2], user_routes[i][4], user_routes[i][5]] for i in range(len(user_routes))]
             routes = dict(zip(keys, values))
-            text = 'Станция отправления: '+ routes[answer][2]+ '; Станция прибытия: '+routes[answer][3]+ '. Вы можете посмотреть ближайщую электричку или расписание'
+            text = 'Станция отправления: ' + routes[answer][2] + '; Станция прибытия: ' + routes[answer][3] + '. Вы можете посмотреть ближайщую электричку или расписание'
             your_routes_kbd = telegram.ReplyKeyboardMarkup([['Ближайшая электричка'], ['Расписание']])
             bot.sendMessage(user_id, text=text, reply_markup=your_routes_kbd)
-            state[user_id] = CHOOSE_TIMETABLE
+            dd[user_id]['current_route'] = answer
 
     if chat_state == MEETING:
         db_transaction(db, 'INSERT INTO cities (uid, user_name) VALUES ("' + str(user_id) + '", "' + answer + '")')
-        text = "Отлично, " + answer + ", вот и познакомились! Теперь расскажите мне, в каком городе Вы живете?"
+        text = "Отлично, " + answer + ", вот и познакомились! Теперь расскажите мне, в каком городе Вы живете? Выберите из списка или введите область проживания самостоятельно"
         state[user_id] = SELECT_CITY
         bot.sendMessage(update.message.chat_id, text=text, reply_markup=city_kbd)
 
     elif chat_state == START:
         # TODO: replace this string constants with something like sure_kbd[0][0]
         if answer == 'Да, изменить':
-            text = user_name + ", пожалуйста, выберите свой город из списка"
+            text = user_name + ", пожалуйста, выберите свой город из списка, или же можете ввести область проживания самостоятельно"
             state[user_id] = SELECT_CITY
             bot.sendMessage(update.message.chat_id, text=text, reply_markup=city_kbd)
         else:
@@ -227,20 +251,32 @@ def chat(bot, update):
             bot.sendMessage(update.message.chat_id, text=text, reply_markup=main_kbd)
 
     elif chat_state == SELECT_CITY:
-        if answer in cities:
-            sql_result = db_transaction(db, 'SELECT city FROM cities WHERE uid=' + str(user_id))
-            if sql_result:
-                db_transaction(db, 'UPDATE cities SET city = "' + answer + '" WHERE uid = "' + str(user_id) + '"')
-            else:
-                # no user in DB
-                # is it possible???
-                db_transaction(db, 'INSERT INTO cities (city) VALUES ("' + answer + '")')
+        sql_result = db_transaction(db, 'SELECT city FROM cities WHERE uid=' + str(user_id))
+        sql_city = db_transaction(db, 'SELECT DISTINCT city FROM codes')
+        levenstein = []
+        for i in range(len(sql_city)):
+            levenstein.append(distance(canonize(sql_city[i][0])[0], answer))
+        dd[user_id]['user_city'] = sql_city[levenstein.index(min(levenstein))][0]
+        # no user in DB
+        # is it possible???
+        text = user_name + ", правильно ли я понимаю, что место вашего проживания: " + dd[user_id]['user_city']
+        state[user_id] = NAME_CHECK
+        bot.sendMessage(user_id, text=text, reply_markup=yes_no_kbd)
+    elif chat_state == NAME_CHECK:
+        if answer == 'Да':
+            db_transaction(db, 'UPDATE cities SET city = "' + dd[user_id]['user_city'] + '" WHERE uid = "' + str(user_id) + '"')
             text = "Отлично, " + user_name + ", теперь Вы можете приступить к использованию бота! Желаете добавить маршрут, которым часто пользуетесь?"
             state[user_id] = CREATE_ROUTE
             bot.sendMessage(user_id, text=text, reply_markup=yes_no_kbd)
-        else:
+        elif answer == 'Нет':
+            state[user_id] = SELECT_CITY
+            del dd[user_id]['user_city']
+            text = user_name + ", давайте попробуем ввести город/область еще раз (если вы живете не в областном центре, то вводите название области)"
+            name_check_kbd = telegram.ReplyKeyboardMarkup([[city] for city in cities])
+            bot.sendMessage(user_id, text=text, reply_markup=name_check_kbd)
+        elif answer == 'Главное меню':
             state[user_id] = MAIN_MENU
-            text = str('Блин, ' + user_name + ', ну что Вам сказать - хреново, нет у нас вашего города. Попробуйте еще в другой раз')
+            text = user_name + ", предлагаю продолжить пользоваться раписанием"
             bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
     elif chat_state == CREATE_ROUTE:
         # TODO: route name must be unique
@@ -253,50 +289,107 @@ def chat(bot, update):
             text = str('Хорошо, ' + user_name + ', Вы всегда можете создать маршрут перейдя во вкладку "Маршруты". Желаю приятного использования TrainRunner. За дополнительной информацией нажмите /help')
             bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
     elif chat_state == ROUTE_NAME:
-        route_name = answer
-        # db_transaction(db, 'INSERT INTO routes (uid, name) VALUES ("' + str(user_id) + '", "' + answer + '")')
-        dd[user_id]['route_name'] = route_name
+        dd[user_id]['route_name'] = answer
         text = "Отлично, " + user_name + ", теперь введите название станции отправления"
         state[user_id] = FROM_STATION
-        wrong_route_kbd = telegram.ReplyKeyboardMarkup([["Я неправильно ввел название маршрута!"]])
-        bot.sendMessage(update.message.chat_id, text=text, reply_markup=wrong_route_kbd)
+        bot.sendMessage(update.message.chat_id, text=text, reply_markup=empty_kbd)
     elif chat_state == FROM_STATION:
-        if answer == "Я неправильно ввел название маршрута!":
-            # db_transaction(db, 'DELETE FROM routes WHERE uid=' + str(user_id) + ' AND name IN ("' + route_name + '")')
-            text = user_name + ', попробуйте ввести название маршрута еще раз'
-            state[user_id] = ROUTE_NAME
-            bot.sendMessage(user_id, text=text, reply_markup=route_name_kbd)
-        else:
-            # sql_station = db_transaction(db, 'SELECT station FROM codes ')
-            levenstein = []
-            for i in range(len(sql_station)):
-                levenstein.append(distance(sql_station[i][0], answer))
-            sql_real_station = db_transaction(db, 'SELECT real_station FROM codes WHERE station ="' + sql_station[levenstein.index(min(levenstein))][0] + '" AND city = "' + user_city.lower() + '" ')
-            sql_esr = db_transaction(db, 'SELECT esr FROM codes WHERE station ="' + sql_station[levenstein.index(min(levenstein))][0] + '" AND city = "' + user_city.lower() + '" ')
-            # db_transaction(db, 'UPDATE routes SET from_ = "' + sql_esr[0][0] + '" WHERE uid= "' + str(user_id) + '" AND name = ("' + route_name + '")')
-            # db_transaction(db, 'UPDATE routes SET from_name = "' + sql_real_station[0][0] + '" WHERE uid= "' + str(user_id) + '" AND name = ("' + route_name + '")')
-            dd[user_id]['from_'] = sql_esr[0][0]
-            dd[user_id]['from_name'] = sql_real_station[0][0]
-            text = user_name + ', ну и станцию прибытия, пожалуйста'
-            state[user_id] = TO_STATION
-            from_kbd = telegram.ReplyKeyboardHide()
-            bot.sendMessage(user_id, text=text, reply_markup=from_kbd)
+        levenstein = []
+        sql_user_station = db_transaction(sqlite3.connect(db_name), 'SELECT station FROM codes WHERE city = "' + user_city + '" ')
+        for i in range(len(sql_user_station)):
+            levenstein.append(distance(sql_user_station[i][0], answer))
+        sql_real_station = db_transaction(db, 'SELECT real_station FROM codes WHERE station ="' + sql_user_station[levenstein.index(min(levenstein))][0] + '" AND city = "' + user_city + '" ')
+        sql_esr = db_transaction(db, 'SELECT esr FROM codes WHERE station ="' + sql_user_station[levenstein.index(min(levenstein))][0] + '" AND city = "' + user_city + '" ')
+        # db_transaction(db, 'UPDATE routes SET from_ = "' + sql_esr[0][0] + '" WHERE uid= "' + str(user_id) + '" AND name = ("' + route_name + '")')
+        # db_transaction(db, 'UPDATE routes SET from_name = "' + sql_real_station[0][0] + '" WHERE uid= "' + str(user_id) + '" AND name = ("' + route_name + '")')
+        dd[user_id]['from_'] = sql_esr[0][0]
+        dd[user_id]['from_name'] = sql_real_station[0][0]
+        text = user_name + ', ну и станцию прибытия, пожалуйста'
+        state[user_id] = TO_STATION
+        bot.sendMessage(user_id, text=text, reply_markup=empty_kbd)
     elif chat_state == TO_STATION:
         levenstein = []
-        for i in range(len(sql_station)):
-            levenstein.append(distance(sql_station[i][0], answer))
-        sql_real_station = db_transaction(db, 'SELECT real_station FROM codes WHERE station ="' + sql_station[levenstein.index(min(levenstein))][0] + '" AND city = "' + user_city.lower() + '" ')
-        sql_esr = db_transaction(db, 'SELECT esr FROM codes WHERE station ="' + sql_station[levenstein.index(min(levenstein))][0] + '" AND city = "' + user_city.lower() + '" ')
+        sql_user_station = db_transaction(db, 'SELECT station FROM codes WHERE city = "' + user_city + '" ')
+        for i in range(len(sql_user_station)):
+            levenstein.append(distance(sql_user_station[i][0], answer))
+        sql_real_station = db_transaction(db, 'SELECT real_station FROM codes WHERE station ="' + sql_user_station[levenstein.index(min(levenstein))][0] + '" AND city = "' + user_city + '" ')
+        sql_esr = db_transaction(db, 'SELECT esr FROM codes WHERE station ="' + sql_user_station[levenstein.index(min(levenstein))][0] + '" AND city = "' + user_city + '" ')
         # db_transaction(db, 'UPDATE routes SET to_ = "' + sql_esr[0][0] + '" WHERE uid= "' + str(user_id) + '" AND name = ("' + route_name + '")')
         # db_transaction(db, 'UPDATE routes SET to_name = "' + sql_real_station[0][0] + '" WHERE uid= "' + str(user_id) + '" AND name = ("' + route_name + '")')
         dd[user_id]['to_'] = sql_esr[0][0]
         dd[user_id]['to_name'] = sql_real_station[0][0]
-        text = user_name + ', поздравляю, маршрут "' + route_name + '" успешно создан! Приятного использования TrainRunner'
+        sql_from_division = db_transaction(db, 'SELECT division FROM codes WHERE real_station ="' + dd[user_id]['from_name'] +'" ')
+        print(sql_from_division)
+        sql_to_division = db_transaction(db, 'SELECT division FROM codes WHERE real_station ="' + dd[user_id]['to_name'] +'" ')
+        print(sql_to_division)
+        if sql_from_division == sql_to_division:
+            text = user_name + ', пожалуйста, проверьте правильность составленного маршрута. Название маршрута: "' + dd[user_id]['route_name'] + '". Станция отправления: "' + dd[user_id]['from_name'] + '". Станция прибытия: "' + dd[user_id]['to_name'] + '"'
+            route_ready_kbd = telegram.ReplyKeyboardMarkup([['Все верно', 'Неверное название маршрута'], ['Неверное название станции отправления', 'Неверное название станции прибытия']])
+            state[user_id] = ROUTE_READY
+            bot.sendMessage(user_id, text=text, reply_markup=route_ready_kbd)
+        else:
+            text = user_name + ', к сожалению, по созданному вами маршруту: "' + dd[user_id]['route_name'] + '" между станцией "' + dd[user_id]['from_name'] + '" и станцией "' + dd[user_id]['to_name'] + '" нет прямой электрички. Возможно, вы неправильно ввели название станции?'
+            route_ready_kbd = telegram.ReplyKeyboardMarkup([['Неверное название станции отправления', 'Неверное название станции прибытия']])
+            state[user_id] = ROUTE_READY
+            bot.sendMessage(user_id, text=text, reply_markup=route_ready_kbd)
+    elif chat_state == ROUTE_READY:
+        if answer == 'Все верно':
+            text = user_name + ', поздравляю, маршрут "' + dd[user_id]['route_name'] + '" успешно создан! Приятного использования TrainRunner'
+            state[user_id] = MAIN_MENU
+            bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
+            q = 'INSERT INTO `routes` (`uid`, `name`, `from_`, `from_name`, `to_`, `to_name`) VALUES ("' + str(user_id) + '", "' + dd[user_id]['route_name'] + '", "' + dd[user_id]['from_'] + '", "' + dd[user_id]['from_name'] + '", "' + dd[user_id]['to_'] + '", "' + dd[user_id]['to_name'] + '")'
+            db_transaction(db, q)
+            del dd[user_id]  
+        elif answer == "Неверное название маршрута":
+            del dd[user_id]['route_name']
+            text = user_name + ', попробуйте ввести название маршрута еще раз'
+            state[user_id] = NAME_CHANGE
+            bot.sendMessage(user_id, text=text, reply_markup=route_name_kbd)
+        elif answer == "Неверное название станции отправления":
+            del dd[user_id]['from_']
+            del dd[user_id]['from_name']
+            text = user_name + ', попробуйте ввести название станции отправления еще раз'
+            state[user_id] = FROM_CHANGE
+            bot.sendMessage(user_id, text=text, reply_markup=empty_kbd)
+        elif answer == "Неверное название станции прибытия":
+            del dd[user_id]['to_']
+            del dd[user_id]['to_name']
+            text = user_name + ', попробуйте ввести название станции прибытия еще раз'
+            state[user_id] = TO_CHANGE
+            bot.sendMessage(user_id, text=text, reply_markup=empty_kbd)
+    elif chat_state == NAME_CHANGE:
+        route_name = answer
+        dd[user_id]['route_name'] = route_name
+        text = user_name + ', после исправлений Ваш маршрут выглядит следующим образом. Теперь все правильно? Название маршрута: "' + route_name + '". Станция отправления: "' + dd[user_id]['from_name'] + '". Станция прибытия: "' + dd[user_id]['to_name'] + '"'
+        route_ready_kbd = telegram.ReplyKeyboardMarkup([['Все верно', 'Неверное название маршрута'], ['Неверное название станции отправления', 'Неверное название станции прибытия']])
         state[user_id] = ROUTE_READY
-        bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
-        q = 'INSERT INTO `routes` (`uid`, `name`, `from_`, `from_name`, `to_`, `to_name`) VALUES ("' + str(user_id) + '", "' + dd[user_id]['route_name'] + '", "' + dd[user_id]['from_'] + '", "' + dd[user_id]['from_name'] + '", "' + dd[user_id]['to_'] + '", "' + dd[user_id]['to_name'] + '")'
-        db_transaction(db, q)
-        del dd[user_id]
+        bot.sendMessage(user_id, text=text, reply_markup=route_ready_kbd)
+    elif chat_state == FROM_CHANGE:
+        levenstein = []
+        sql_user_station = db_transaction(sqlite3.connect(db_name), 'SELECT station FROM codes WHERE city = "' + user_city + '" ')
+        for i in range(len(sql_user_station)):
+            levenstein.append(distance(sql_user_station[i][0], answer))
+        sql_real_station = db_transaction(db, 'SELECT real_station FROM codes WHERE station ="' + sql_user_station[levenstein.index(min(levenstein))][0] + '" AND city = "' + user_city + '" ')
+        sql_esr = db_transaction(db, 'SELECT esr FROM codes WHERE station ="' + sql_user_station[levenstein.index(min(levenstein))][0] + '" AND city = "' + user_city + '" ')
+        dd[user_id]['from_'] = sql_esr[0][0]
+        dd[user_id]['from_name'] = sql_real_station[0][0]
+        text = user_name + ', после исправлений Ваш маршрут выглядит следующим образом. Теперь все правильно? Название маршрута: "' + route_name + '". Станция отправления: "' + dd[user_id]['from_name'] + '". Станция прибытия: "' + dd[user_id]['to_name'] + '"'
+        route_ready_kbd = telegram.ReplyKeyboardMarkup([['Все верно', 'Неверное название маршрута'], ['Неверное название станции отправления', 'Неверное название станции прибытия']])
+        state[user_id] = ROUTE_READY
+        bot.sendMessage(user_id, text=text, reply_markup=route_ready_kbd)
+    elif chat_state == TO_CHANGE:
+        levenstein = []
+        sql_user_station = db_transaction(sqlite3.connect(db_name), 'SELECT station FROM codes WHERE city = "' + user_city + '" ')
+        for i in range(len(sql_user_station)):
+            levenstein.append(distance(sql_user_station[i][0], answer))
+        sql_real_station = db_transaction(db, 'SELECT real_station FROM codes WHERE station ="' + sql_user_station[levenstein.index(min(levenstein))][0] + '" AND city = "' + user_city + '" ')
+        sql_esr = db_transaction(db, 'SELECT esr FROM codes WHERE station ="' + sql_user_station[levenstein.index(min(levenstein))][0] + '" AND city = "' + user_city + '" ')
+        dd[user_id]['to_'] = sql_esr[0][0]
+        dd[user_id]['to_name'] = sql_real_station[0][0]
+        text = user_name + ', после исправлений Ваш маршрут выглядит следующим образом. Теперь все правильно? Название маршрута: "' + route_name + '". Станция отправления: "' + dd[user_id]['from_name'] + '". Станция прибытия: "' + dd[user_id]['to_name'] + '"'
+        route_ready_kbd = telegram.ReplyKeyboardMarkup([['Все верно', 'Неверное название маршрута'], ['Неверное название станции отправления', 'Неверное название станции прибытия']])
+        state[user_id] = ROUTE_READY
+        bot.sendMessage(user_id, text=text, reply_markup=route_ready_kbd)
 
 
 def main():
