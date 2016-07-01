@@ -24,8 +24,12 @@ cities = ("Москва и МО", "Санкт-Петербург и ЛО", "Но
 default_route_names = ("На работу", "Домой", "К маме",)
 train = namedtuple('train', ['uid', 'arrival', 'departure', 'duration', 'stops', 'express'])
 
+button_next = telegram.InlineKeyboardButton(text='Следующие 5', callback_data='next_trains')
+button_prev = telegram.InlineKeyboardButton(text='Предыдущие 5', callback_data='prev_trains')
+next_prev_kbd = telegram.InlineKeyboardMarkup([[button_prev, button_next]])
 
-
+# number of trains to show
+n_trains = 5
 # Define all possible states of a chat
 SELECT_CITY, MAIN_MENU, START, MEETING, CREATE_ROUTE, ROUTE_NAME, FROM_STATION, TO_STATION, ROUTE_READY, STILL_NO_ROUTES, CHOOSE_ROUTE, CHOOSE_TIMETABLE, NEXT_TRAIN, ROUTE_CHECK, NAME_CHANGE, FROM_CHANGE, TO_CHANGE, NAME_CHECK, RASP = range(19)
 
@@ -117,17 +121,57 @@ def print_next_train(user_id, route_name):
         return text
 
 
-def print_rasp(user_id, route_name, n=None):
-    from_st, to_st, from_name, to_name = db_transaction(sqlite3.connect(db_name), "SELECT `from_`, `to_`, `from_name`, `to_name` FROM `routes` WHERE (`uid`='" + str(user_id) + "' AND `name`='" + route_name + "')")[0]
-    trains = get_trains(from_st, to_st)
+def print_rasp(bot, user_id, trains=None, route_name=None, from_st=None, to_st=None, from_name=None, to_name=None, n=None):
+    if trains is None:
+        if route_name is None:
+            text = "Расписание электричек \"" + from_name + "\" - \"" + to_name + "\":\n"
+        else:
+            from_st, to_st, from_name, to_name = db_transaction(sqlite3.connect(db_name), "SELECT `from_`, `to_`, `from_name`, `to_name` FROM `routes` WHERE (`uid`='" + str(user_id) + "' AND `name`='" + route_name + "')")[0]
+            text = "Расписание электричек по маршруту '" + route_name + "' (" + from_name + " - " + to_name + ").\n"
+        trains = get_trains(from_st, to_st)
+        dd[user_id]['scrollable_trains'] = list(trains)
+        dd[user_id]['scroll_trains_offset'] = 0
+        if 'scrollable_message_id' in dd[user_id]:
+            bot.edit_message_reply_markup(chat_id=user_id, message_id=dd[user_id]['scrollable_message_id'])
+    else:
+        text = ''
+        n = len(trains)
     if n is None:
-        n = min(len(trains), 20)
+        n = min(len(trains), 9)
+    else:
+        n = min(len(trains), n)
     trains = trains[:n-1]
-    # sorted_trains = sorted(trains, key=lambda t: t.departure-datetime.datetime.now())
-    text = "Расписание электричек по маршруту '" + route_name + "' (" + from_name + " - " + to_name + ").\n"
     for train in trains:
         text += "\n" + print_train(train) + "\n"
     return text
+
+
+def scroll(bot, update):
+    w_text = ''
+    action = update.callback_query.data
+    user_id = update.callback_query.message.chat_id
+    trains = dd[user_id]['scrollable_trains']
+    if action == 'next_trains':
+        if dd[user_id]['scroll_trains_offset'] >= len(trains)-n_trains:
+            w_text = "Достигнут концец списка"
+        else:
+            dd[user_id]['scroll_trains_offset'] += n_trains
+            # text = 'Следующие поезда' + str(dd[user_id]['scroll_trains_offset'])
+            offset = dd[user_id]['scroll_trains_offset']
+            text = print_rasp(bot, user_id, trains=trains[offset:min(offset+n_trains, len(trains))])
+    elif action == 'prev_trains':
+        if dd[user_id]['scroll_trains_offset'] <= 0:
+            w_text = "Достигнуто начало списка"
+        else:
+            dd[user_id]['scroll_trains_offset'] -= n_trains
+            offset = dd[user_id]['scroll_trains_offset']
+            text = print_rasp(bot, user_id, trains=trains[offset:min(offset+n_trains, len(trains))])
+            # text = 'Предыдущие поезда' + str(dd[user_id]['scroll_trains_offset'])
+    if w_text:
+        bot.answerCallbackQuery(text=w_text, callback_query_id=update.callback_query.id)
+    else:
+        bot.answerCallbackQuery(callback_query_id=update.callback_query.id)
+        bot.editMessageText(text=text, chat_id=update.callback_query.message.chat.id, message_id=update.callback_query.message.message_id, reply_markup=next_prev_kbd)
 
 
 def start(bot, update):
@@ -182,7 +226,7 @@ def chat(bot, update):
     city_kbd = telegram.ReplyKeyboardMarkup([[city] for city in cities] + [['Главное меню']])
     main_kbd = telegram.ReplyKeyboardMarkup([['Расписание', 'Ближайшая электричка'], ['Маршруты', 'INFO']])
     yes_no_kbd = telegram.ReplyKeyboardMarkup([['Да'], ['Нет']])
-    route_name_kbd = telegram.ReplyKeyboardMarkup([[route_name] for route_name in default_route_names] + [['Главное меню']])
+    route_name_kbd = telegram.ReplyKeyboardMarkup([[route_name] for route_name in default_route_names] + [['Главное меню']],  one_time_keyboard=True, resize_keyboard=True)
     no_routes_kbd = telegram.ReplyKeyboardMarkup([['Новый маршрут'], ['Главное меню']])
     empty_kbd = telegram.ReplyKeyboardHide()
 
@@ -190,6 +234,9 @@ def chat(bot, update):
         state[user_id] = MAIN_MENU
         text = user_name + ", предлагаю продолжить пользоваться раписанием"
         bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
+        for key in ('current_route', 'route_name', 'from_', 'from_name', 'to_', 'to_name'):
+            if key in dd[user_id]:
+                del dd[user_id][key]
     elif answer == 'Маршруты':
         user_routes = db_transaction(db, 'SELECT name FROM routes WHERE uid=' + str(user_id))
         if not user_routes:
@@ -221,9 +268,9 @@ def chat(bot, update):
                 bot.sendMessage(user_id, text=text, reply_markup=user_routes_kbd)
     elif answer == 'Расписание':
         if dd[user_id].get('current_route'):
-            text = print_rasp(user_id, dd[user_id]['current_route'])
+            text = print_rasp(bot, user_id, route_name=dd[user_id]['current_route'], n=n_trains)
             state[user_id] = MAIN_MENU
-            bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
+            dd[user_id]['scrollable_message_id'] = bot.sendMessage(user_id, text=text, reply_markup=next_prev_kbd).message_id
             del dd[user_id]['current_route']
         else:
             user_routes = db_transaction(db, 'SELECT name FROM routes WHERE uid=' + str(user_id))
@@ -253,9 +300,9 @@ def chat(bot, update):
             state[user_id] = FROM_STATION
             bot.sendMessage(update.message.chat_id, text=text, reply_markup=empty_kbd)
         else:
-            text = print_rasp(user_id, answer)
+            text = print_rasp(bot, user_id, route_name=answer, n=n_trains)
             state[user_id] = MAIN_MENU
-            bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
+            dd[user_id]['scrollable_message_id'] = bot.sendMessage(user_id, text=text, reply_markup=next_prev_kbd).message_id
     elif chat_state == STILL_NO_ROUTES:
         if answer == 'Новый маршрут':
             text = user_name + ', давайте вместе создадим новый маршрут. Предлагаю Вам выбрать для него название из списка - или можете ввести свое'
@@ -361,14 +408,15 @@ def chat(bot, update):
                 state[user_id] = MAIN_MENU
                 bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
             elif dd[user_id]['route_name'] == "%tmp.rasp%":
-                trains = get_trains(dd[user_id]['from_'], dd[user_id]['to_'])
-                n = 20
-                trains = trains[:n-1]
-                text = "Расписание электричек:\n"
-                for train in trains:
-                    text += "\n" + print_train(train) + "\n"
+                # trains = get_trains(dd[user_id]['from_'], dd[user_id]['to_'])
+                # trains = trains[:n_trains-1]
+                # text = "Расписание электричек:\n"
+                # for train in trains:
+                #     text += "\n" + print_train(train) + "\n"
+                text = print_rasp(bot, user_id, from_st=dd[user_id]['from_'], from_name=dd[user_id]['from_name'], to_st=dd[user_id]['to_'], to_name=dd[user_id]['to_name'], n=n_trains)
                 state[user_id] = MAIN_MENU
-                bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
+                dd[user_id]['scrollable_message_id'] = bot.sendMessage(user_id, text=text, reply_markup=next_prev_kbd).message_id
+                # TODO: save the route as ...
             else:
                 # ordinary route
                 text = user_name + ', пожалуйста, проверьте правильность составленного маршрута. Название маршрута: "' + dd[user_id]['route_name'] + '". Станция отправления: "' + dd[user_id]['from_name'] + '". Станция прибытия: "' + dd[user_id]['to_name'] + '"'
@@ -458,6 +506,10 @@ def main():
 
     # on noncommand i.e message
     dp.add_handler(MessageHandler([Filters.text], chat))
+
+    # inline keyboard handler
+    dp.add_handler(telegram.ext.CallbackQueryHandler(scroll))
+    # TODO: update messages with time information
 
     # log all errors
     dp.add_error_handler(error)
