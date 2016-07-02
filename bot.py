@@ -8,6 +8,7 @@ import logging
 import sqlite3
 import json
 import datetime
+import pytz
 
 # TODO: write logs to file
 # Enable logging
@@ -88,8 +89,8 @@ def get_trains(from_esr, to_esr, date=None):
     return trains
 
 
-def next_train(from_esr, to_esr):
-    now = datetime.datetime.now()
+def next_train(from_esr, to_esr,user_id):
+    now = datetime.datetime.now()+datetime.timedelta(hours=timezones[dd[user_id]['user_city']]-3)
     sorted_trains = sorted(get_trains(from_esr, to_esr), key=lambda t: t.departure-now)
     rest_trains = [t for t in sorted_trains if (now-t.departure) < datetime.timedelta(0, 0, 0)]
     # TODO: find the next train even if there is no trains today
@@ -99,10 +100,11 @@ def next_train(from_esr, to_esr):
         return []
 
 
-def print_train(train):
+def print_train(train,user_id):
     departure = train.departure.strftime('%H:%M')
     arrival = train.arrival.strftime('%H:%M')
-    dt = train.departure-datetime.datetime.now()
+    now = datetime.datetime.now()+datetime.timedelta(hours=timezones[dd[user_id]['user_city']]-3)
+    dt = train.departure-now
     if dt < datetime.timedelta(seconds=0):
         dt = "ушла"
     elif dt < datetime.timedelta(minutes=1):
@@ -117,7 +119,7 @@ def print_train(train):
 
 def print_next_train(user_id, route_name):
         from_st, to_st, from_name, to_name = db_transaction(sqlite3.connect(db_name), "SELECT `from_`, `to_`, `from_name`, `to_name` FROM `routes` WHERE (`uid`='" + str(user_id) + "' AND `name`='" + route_name + "')")[0]
-        text = "Ближайшая электричка по маршруту '" + route_name + "' (" + from_name + " - " + to_name + ").\n" + print_train(next_train(from_st, to_st))
+        text = "Ближайшая электричка по маршруту '" + route_name + "' (" + from_name + " - " + to_name + ").\n" + print_train(next_train(from_st, to_st,user_id),user_id)
         return text
 
 
@@ -142,7 +144,7 @@ def print_rasp(bot, user_id, trains=None, route_name=None, from_st=None, to_st=N
         n = min(len(trains), n)
     trains = trains[:n-1]
     for train in trains:
-        text += "\n" + print_train(train) + "\n"
+        text += "\n" + print_train(train,user_id) + "\n"
     return text
 
 
@@ -178,14 +180,15 @@ def start(bot, update):
     user_id = update.message.from_user.id
     db = sqlite3.connect(db_name)
     sql_result = db_transaction(db, 'SELECT user_name, city FROM cities WHERE uid=' + str(user_id))
+    user_name, user_city = sql_result[0]
     if user_id not in dd:
         dd[user_id] = dict()
+        dd[user_id]['user_city'] = user_city 
     if not sql_result:
         text = "Добро пожаловать в TrainRunnerBot - сервис для тех, кто хочет всегда успевать на свою электричку. Давайте знакомиться. Я - Олег. А как Вас зовут?"
         state[user_id] = MEETING
         bot.sendMessage(update.message.chat_id, text=text)
     else:
-        user_name, user_city = sql_result[0]
         text = user_name + ", Вы уже есть в нашей базе данных. Желаете изменить " + user_city + " на какой-то другой город?"
         sure_kbd = [['Да, изменить'], ['Нет, оставить ' + user_city]]
         sure_kbd = telegram.ReplyKeyboardMarkup(sure_kbd)
@@ -213,7 +216,9 @@ def chat(bot, update):
         route_name = ''
     elif 'route_name' in dd[user_id]:
         route_name = dd[user_id]['route_name']
+        dd[user_id]['user_city']=user_city
     else:
+        dd[user_id]['user_city']=user_city
         route_name = ''
     # TODO: cache some sql results?
     if chat_state in (TO_STATION, FROM_STATION):
@@ -404,7 +409,7 @@ def chat(bot, update):
         dd[user_id]['to_name'] = sql_real_station[0][0]
         if dd[user_id]['from_name'] != dd[user_id]['to_name']:
             if dd[user_id]['route_name'] == "%tmp.next_train%":
-                text = "Ближайшая электричка:\n" + print_train(next_train(dd[user_id]['from_'], dd[user_id]['to_']))
+                text = "Ближайшая электричка:\n" + print_train(next_train(dd[user_id]['from_'], dd[user_id]['to_'],user_id),user_id)
                 state[user_id] = MAIN_MENU
                 bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
             elif dd[user_id]['route_name'] == "%tmp.rasp%":
