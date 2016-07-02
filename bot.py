@@ -91,7 +91,12 @@ def get_trains(from_esr, to_esr, date=None):
 
 def next_train(from_esr, to_esr, user_id):
     now = datetime.datetime.now()+datetime.timedelta(hours=timezones[dd[user_id]['user_city']]-3)
-    sorted_trains = sorted(get_trains(from_esr, to_esr), key=lambda t: t.departure-now)
+    for i in range(7):
+        sorted_trains = sorted(get_trains(from_esr, to_esr, datetime.datetime.now()+datetime.timedelta(days=i)), key=lambda t: t.departure-now)
+        print(i, sorted_trains)
+        if sorted_trains:
+            print('\t\t>>>break')
+            break
     rest_trains = [t for t in sorted_trains if (now-t.departure) < datetime.timedelta(0, 0, 0)]
     # TODO: find the next train even if there is no trains today
     if rest_trains:
@@ -119,6 +124,7 @@ def print_train(train, user_id):
 
 def print_next_train(user_id, route_name):
         from_st, to_st, from_name, to_name = db_transaction(sqlite3.connect(db_name), "SELECT `from_`, `to_`, `from_name`, `to_name` FROM `routes` WHERE (`uid`='" + str(user_id) + "' AND `name`='" + route_name + "')")[0]
+        # TODO: make sure that next_train() is not an empty list
         text = "Ближайшая электричка по маршруту '" + route_name + "' (" + from_name + " - " + to_name + ").\n" + print_train(next_train(from_st, to_st, user_id), user_id)
         return text
 
@@ -209,11 +215,6 @@ def chat(bot, update):
     answer = update.message.text
     chat_state = state.get(user_id)
     db = sqlite3.connect(db_name)
-    if chat_state != MEETING:
-        # TODO: cache some sql results?
-        sql_result = db_transaction(db, 'SELECT user_name, city FROM cities WHERE uid=' + str(user_id))
-        user_name, user_city = sql_result[0]
-        dd[user_id]['user_city'] = user_city
     if user_id not in dd:
         dd[user_id] = dict()
         route_name = ''
@@ -221,6 +222,12 @@ def chat(bot, update):
         route_name = dd[user_id]['route_name']
     else:
         route_name = ''
+    if chat_state != MEETING:
+        # TODO: cache some sql results?
+        sql_result = db_transaction(db, 'SELECT user_name, city FROM cities WHERE uid=' + str(user_id))
+        user_name, user_city = sql_result[0]
+        if 'user_city' not in dd[user_id]:
+            dd[user_id]['user_city'] = user_city
 
     # Keyboards
     city_kbd = telegram.ReplyKeyboardMarkup([[city] for city in cities] + [['Главное меню']])

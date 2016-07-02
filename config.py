@@ -1,5 +1,5 @@
-telegram_token = '231283593:AAHTpnKzq0QHITzo2r2ZBMcM8Mfcvxecffk'
-ya_apikey = '8db03afe-1e60-4496-a0e0-bcc24f1070c5'
+telegram_token = ''
+ya_apikey = ''
 ya_apiurl = 'https://api.rasp.yandex.net/v1.0/search/?'
 timezones = {'Азербайджан': 4,
              'Алтайский край': 7,
