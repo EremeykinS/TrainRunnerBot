@@ -8,7 +8,6 @@ import logging
 import sqlite3
 import json
 import datetime
-import pytz
 
 # TODO: write logs to file
 # Enable logging
@@ -20,7 +19,6 @@ state = dict()
 # dict in dict
 dd = dict()
 
-db_name = 'DB.sqlite'
 cities = ("Москва и МО", "Санкт-Петербург и ЛО", "Новосибирская область",)
 default_route_names = ("На работу", "Домой", "К маме",)
 train = namedtuple('train', ['uid', 'arrival', 'departure', 'duration', 'stops', 'express'])
@@ -32,7 +30,17 @@ next_prev_kbd = telegram.InlineKeyboardMarkup([[button_prev, button_next]])
 # number of trains to show
 n_trains = 5
 # Define all possible states of a chat
-SELECT_CITY, MAIN_MENU, START, MEETING, CREATE_ROUTE, ROUTE_NAME, FROM_STATION, TO_STATION, ROUTE_READY, STILL_NO_ROUTES, CHOOSE_ROUTE, CHOOSE_TIMETABLE, NEXT_TRAIN, ROUTE_CHECK, NAME_CHANGE, FROM_CHANGE, TO_CHANGE, NAME_CHECK, RASP = range(19)
+SELECT_CITY, MAIN_MENU, START, MEETING, CREATE_ROUTE, ROUTE_NAME, FROM_STATION, TO_STATION, ROUTE_READY, STILL_NO_ROUTES, CHOOSE_ROUTE, CHOOSE_TIMETABLE, NEXT_TRAIN, ROUTE_CHECK, NAME_CHANGE, FROM_CHANGE, TO_CHANGE, NAME_CHECK, RASP, RASP_DATE = range(20)
+
+
+class Route:
+    def __init__(self, user_id=None, name=None, from_st=None, to_st=None, from_name=None, to_name=None):
+        if user_id:
+            self.name = name
+            self.from_st, self.to_st, self.from_name, self.to_name = db_transaction(sqlite3.connect(db_name), "SELECT `from_`, `to_`, `from_name`, `to_name` FROM `routes` WHERE (`uid`='" + str(user_id) + "' AND `name`='" + name + "')")[0]
+        else:
+            self.name = "%tmp%"
+            self.from_st, self.to_st, self.from_name, self.to_name = from_st, to_st, from_name, to_name
 
 
 def db_transaction(db, q):
@@ -110,7 +118,9 @@ def print_train(train, user_id):
     arrival = train.arrival.strftime('%H:%M')
     now = datetime.datetime.now()+datetime.timedelta(hours=timezones[dd[user_id]['user_city']]-3)
     dt = train.departure-now
-    if dt < datetime.timedelta(seconds=0):
+    if dt > datetime.timedelta(hours=24):
+        dt = "еще нескоро"
+    elif dt < datetime.timedelta(seconds=0):
         dt = "ушла"
     elif dt < datetime.timedelta(minutes=1):
         dt = "сейчас"
@@ -122,21 +132,22 @@ def print_train(train, user_id):
     return "Отправляется в " + departure + " (" + dt + "), прибывает в " + arrival + " (экспресс)" if train.express else "Отправляется в " + departure + " (" + dt + "), прибывает в " + arrival
 
 
-def print_next_train(user_id, route_name):
-        from_st, to_st, from_name, to_name = db_transaction(sqlite3.connect(db_name), "SELECT `from_`, `to_`, `from_name`, `to_name` FROM `routes` WHERE (`uid`='" + str(user_id) + "' AND `name`='" + route_name + "')")[0]
+def print_next_train(user_id, route):
         # TODO: make sure that next_train() is not an empty list
-        text = "Ближайшая электричка по маршруту '" + route_name + "' (" + from_name + " - " + to_name + ").\n" + print_train(next_train(from_st, to_st, user_id), user_id)
+        if route.name.startswith("%tmp"):
+            text = "Ближайшая электричка " + route.from_name + " - " + route.to_name + ":\n" + print_train(next_train(route.from_st, route.to_st, user_id), user_id)
+        else:
+            text = "Ближайшая электричка по маршруту '" + route.name + "' (" + route.from_name + " - " + route.to_name + ").\n" + print_train(next_train(route.from_st, route.to_st, user_id), user_id)
         return text
 
 
-def print_rasp(bot, user_id, trains=None, route_name=None, from_st=None, to_st=None, from_name=None, to_name=None, n=None):
+def print_rasp(bot, user_id, trains=None, route=None, date=None, n=None):
     if trains is None:
-        if route_name is None:
-            text = "Расписание электричек \"" + from_name + "\" - \"" + to_name + "\":\n"
+        if route.name.startswith("%tmp"):
+            text = "Расписание электричек \"" + route.from_name + "\" - \"" + route.to_name + "\":\n"
         else:
-            from_st, to_st, from_name, to_name = db_transaction(sqlite3.connect(db_name), "SELECT `from_`, `to_`, `from_name`, `to_name` FROM `routes` WHERE (`uid`='" + str(user_id) + "' AND `name`='" + route_name + "')")[0]
-            text = "Расписание электричек по маршруту '" + route_name + "' (" + from_name + " - " + to_name + ").\n"
-        trains = get_trains(from_st, to_st)
+            text = "Расписание электричек по маршруту '" + route.name + "' (" + route.from_name + " - " + route.to_name + ").\n"
+        trains = get_trains(route.from_st, route.to_st, date=date)
         dd[user_id]['scrollable_trains'] = list(trains)
         dd[user_id]['scroll_trains_offset'] = 0
         if 'scrollable_message_id' in dd[user_id]:
@@ -164,7 +175,6 @@ def scroll(bot, update):
             w_text = "Достигнут концец списка"
         else:
             dd[user_id]['scroll_trains_offset'] += n_trains
-            # text = 'Следующие поезда' + str(dd[user_id]['scroll_trains_offset'])
             offset = dd[user_id]['scroll_trains_offset']
             text = print_rasp(bot, user_id, trains=trains[offset:min(offset+n_trains, len(trains))])
     elif action == 'prev_trains':
@@ -174,7 +184,6 @@ def scroll(bot, update):
             dd[user_id]['scroll_trains_offset'] -= n_trains
             offset = dd[user_id]['scroll_trains_offset']
             text = print_rasp(bot, user_id, trains=trains[offset:min(offset+n_trains, len(trains))])
-            # text = 'Предыдущие поезда' + str(dd[user_id]['scroll_trains_offset'])
     if w_text:
         bot.answerCallbackQuery(text=w_text, callback_query_id=update.callback_query.id)
     else:
@@ -235,6 +244,7 @@ def chat(bot, update):
     yes_no_kbd = telegram.ReplyKeyboardMarkup([['Да'], ['Нет']])
     route_name_kbd = telegram.ReplyKeyboardMarkup([[route_name] for route_name in default_route_names] + [['Главное меню']],  one_time_keyboard=True, resize_keyboard=True)
     no_routes_kbd = telegram.ReplyKeyboardMarkup([['Новый маршрут'], ['Главное меню']])
+    date_kbd = telegram.ReplyKeyboardMarkup([['Вчера'], ['Сегодня'], ['Завтра'], ['Главное меню']])
     empty_kbd = telegram.ReplyKeyboardHide()
 
     if answer == 'Главное меню':
@@ -258,7 +268,7 @@ def chat(bot, update):
             bot.sendMessage(user_id, text=text, reply_markup=user_routes_kbd)
     elif answer == 'Ближайшая электричка':
         if dd[user_id].get('current_route'):
-            text = print_next_train(user_id, dd[user_id]['current_route'])
+            text = print_next_train(user_id, route=dd[user_id]['current_route'])
             state[user_id] = MAIN_MENU
             bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
             del dd[user_id]['current_route']
@@ -275,10 +285,9 @@ def chat(bot, update):
                 bot.sendMessage(user_id, text=text, reply_markup=user_routes_kbd)
     elif answer == 'Расписание':
         if dd[user_id].get('current_route'):
-            text = print_rasp(bot, user_id, route_name=dd[user_id]['current_route'], n=n_trains)
-            state[user_id] = MAIN_MENU
-            dd[user_id]['scrollable_message_id'] = bot.sendMessage(user_id, text=text, reply_markup=next_prev_kbd).message_id
-            del dd[user_id]['current_route']
+            text = "Выберите дату, на которую интересует расписание. Можете ввести другую в формате день.месяц.год (например 4.07.2015 для того, чтобы выбрать 4 июля 2015 года). "
+            state[user_id] = RASP_DATE
+            bot.sendMessage(user_id, text=text, reply_markup=date_kbd)
         else:
             user_routes = db_transaction(db, 'SELECT name FROM routes WHERE uid=' + str(user_id))
             if not user_routes:
@@ -297,7 +306,7 @@ def chat(bot, update):
             state[user_id] = FROM_STATION
             bot.sendMessage(update.message.chat_id, text=text, reply_markup=empty_kbd)
         else:
-            text = print_next_train(user_id, answer)
+            text = print_next_train(user_id, Route(user_id, name=answer))
             state[user_id] = MAIN_MENU
             bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
     elif chat_state == RASP:
@@ -307,14 +316,14 @@ def chat(bot, update):
             state[user_id] = FROM_STATION
             bot.sendMessage(update.message.chat_id, text=text, reply_markup=empty_kbd)
         else:
-            text = print_rasp(bot, user_id, route_name=answer, n=n_trains)
-            state[user_id] = MAIN_MENU
-            dd[user_id]['scrollable_message_id'] = bot.sendMessage(user_id, text=text, reply_markup=next_prev_kbd).message_id
+            text = "Выберите дату, на которую интересует расписание. Можете ввести другую в формате день.месяц.год (например 4.07.2015 для того, чтобы выбрать 4 июля 2015 года). "
+            state[user_id] = RASP_DATE
+            bot.sendMessage(user_id, text=text, reply_markup=date_kbd)
+            dd[user_id]['current_route'] = Route(user_id, name=answer)
     elif chat_state == STILL_NO_ROUTES:
         if answer == 'Новый маршрут':
             text = user_name + ', давайте вместе создадим новый маршрут. Предлагаю Вам выбрать для него название из списка - или можете ввести свое'
             state[user_id] = ROUTE_NAME
-            # route_name_kbd = telegram.ReplyKeyboardMarkup([[route_name] for route_name in default_route_names])
             bot.sendMessage(user_id, text=text, reply_markup=route_name_kbd)
         else:
             state[user_id] = MAIN_MENU
@@ -333,7 +342,7 @@ def chat(bot, update):
             text = 'Станция отправления: ' + routes[answer][2] + '; Станция прибытия: ' + routes[answer][3] + '. Вы можете посмотреть ближайщую электричку или расписание'
             your_routes_kbd = telegram.ReplyKeyboardMarkup([['Ближайшая электричка'], ['Расписание'], ['Главное меню']])
             bot.sendMessage(user_id, text=text, reply_markup=your_routes_kbd)
-            dd[user_id]['current_route'] = answer
+            dd[user_id]['current_route'] = Route(user_id, name=answer)
     elif chat_state == MEETING:
         db_transaction(db, 'INSERT INTO cities (uid, user_name) VALUES ("' + str(user_id) + '", "' + answer + '")')
         text = "Отлично, " + answer + ", вот и познакомились! Теперь расскажите мне, в каком городе Вы живете? Выберите из списка или введите область проживания самостоятельно"
@@ -350,7 +359,6 @@ def chat(bot, update):
             text = "Хорошо, " + user_name + ". Я понял, город менять не будем. Предлагаю продолжить пользоваться раписанием"
             bot.sendMessage(update.message.chat_id, text=text, reply_markup=main_kbd)
     elif chat_state == SELECT_CITY:
-        # sql_result = db_transaction(db, 'SELECT city FROM cities WHERE uid=' + str(user_id))
         sql_city = db_transaction(db, 'SELECT DISTINCT city FROM codes')
         levenstein = []
         for i in range(len(sql_city)):
@@ -415,9 +423,10 @@ def chat(bot, update):
                 state[user_id] = MAIN_MENU
                 bot.sendMessage(user_id, text=text, reply_markup=main_kbd)
             elif dd[user_id]['route_name'] == "%tmp.rasp%":
-                text = print_rasp(bot, user_id, from_st=dd[user_id]['from_'], from_name=dd[user_id]['from_name'], to_st=dd[user_id]['to_'], to_name=dd[user_id]['to_name'], n=n_trains)
-                state[user_id] = MAIN_MENU
-                dd[user_id]['scrollable_message_id'] = bot.sendMessage(user_id, text=text, reply_markup=next_prev_kbd).message_id
+                text = "Выберите дату, на которую интересует расписание. Можете ввести другую в формате день.месяц.год (например 4.07.2015 для того, чтобы выбрать 4 июля 2015 года). "
+                state[user_id] = RASP_DATE
+                bot.sendMessage(user_id, text=text, reply_markup=date_kbd)
+                dd[user_id]['current_route'] = Route(from_st=dd[user_id]['from_'], from_name=dd[user_id]['from_name'], to_st=dd[user_id]['to_'], to_name=dd[user_id]['to_name'])
                 # TODO: save the route as ...
             else:
                 # ordinary route
@@ -489,6 +498,25 @@ def chat(bot, update):
         route_ready_kbd = telegram.ReplyKeyboardMarkup([['Все верно', 'Неверное название маршрута'], ['Неверное название станции отправления', 'Неверное название станции прибытия'], ['Главное меню']])
         state[user_id] = ROUTE_READY
         bot.sendMessage(user_id, text=text, reply_markup=route_ready_kbd)
+    elif chat_state == RASP_DATE:
+        if answer == "Сегодня":
+            date = datetime.datetime.now()
+        elif answer == "Завтра":
+            date = datetime.datetime.now() + datetime.timedelta(days=1)
+        elif answer == "Вчера":
+            date = datetime.datetime.now() - datetime.timedelta(days=1)
+        else:
+            try:
+                day, month, year = (int(part) for part in answer.split(".", maxsplit=2))
+                date = datetime.datetime(year, month, day)
+            except ValueError:
+                text = "Это какая-то непонятная дата. Пробуй-ка еще раз ввести дату в формате \"день.месяц.год\"!"
+                bot.sendMessage(user_id, text=text, reply_markup=date_kbd)
+                return
+        text = print_rasp(bot, user_id, route=dd[user_id]['current_route'], date=date, n=n_trains)
+        state[user_id] = MAIN_MENU
+        dd[user_id]['scrollable_message_id'] = bot.sendMessage(user_id, text=text, reply_markup=next_prev_kbd).message_id
+        del dd[user_id]['current_route']
     else:
         text = "Ваши намерения не ясны! Попробуйте еще, в этот раз у Вас все получится!"
         state[user_id] = MAIN_MENU
